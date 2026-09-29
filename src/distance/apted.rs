@@ -22,6 +22,7 @@
 
 use super::matrix::Matrix;
 use crate::cost_model::CostModel;
+use crate::error::{check_memory, estimated_peak_bytes, floats_to_bytes, TedError};
 use crate::node::{Node, NodeIndexer};
 
 /// Identifier of left path type.
@@ -47,6 +48,12 @@ pub struct APTED<'a, C, D> {
     /// Number of subproblems encountered while computing the distance
     /// [1, Section 10].
     counter: u64,
+    /// Distance of the current pair, once computed; the mapping needs it.
+    distance: Option<f32>,
+    /// Optional cap on the estimated peak memory, in bytes.
+    memory_limit: Option<usize>,
+    /// Bytes checked up front for the current pair (see [`Work`]).
+    checked_bytes: usize,
 }
 
 /// Mutable state of one distance computation. Kept apart from the node
@@ -63,6 +70,13 @@ struct Work<'c, C> {
     /// Reused forest distance matrix of spfL and spfR (row-major).
     forestdist: Vec<f32>,
     counter: u64,
+    /// Memory limit for spfA's tables, from [`APTED::with_memory_limit`].
+    memory_limit: Option<usize>,
+    /// Bytes already checked against the limit and the allocator; spfA
+    /// tables up to this size need no further check.
+    checked_bytes: usize,
+    /// Set when spfA cannot allocate its tables; stops the computation.
+    error: Option<TedError>,
 }
 
 /// Per-column data of the spfL/spfR inner loop.
@@ -76,6 +90,22 @@ struct Column<'n, D> {
     is_tree: bool,
 }
 
+/// A strategy path being processed by [`Work::gted`]: the subtree pair,
+/// which tree the path lies in, and how far the walk up the path and over
+/// the children of the current path node has got.
+struct GtedFrame {
+    subtree1: i32,
+    subtree2: i32,
+    in_tree2: bool,
+    path_type: u8,
+    /// First node of the path (a leaf), as passed to spfA.
+    path_start: i32,
+    /// Current node of the walk up the path.
+    path_node: i32,
+    /// Next child of `path_node`'s parent to visit.
+    child_idx: usize,
+}
+
 impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
     pub fn new(cost_model: C) -> Self {
         Self {
@@ -86,13 +116,47 @@ impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
             size2: 0,
             delta: Matrix::default(),
             counter: 0,
+            distance: None,
+            memory_limit: None,
+            checked_bytes: 0,
         }
+    }
+
+    /// Makes [`Self::try_compute_edit_distance`] fail with
+    /// [`TedError::MemoryLimitExceeded`] instead of computing when the
+    /// estimated peak memory ([`crate::estimated_peak_bytes`]) is above
+    /// `bytes`. Use it when tree sizes come from untrusted input.
+    pub fn with_memory_limit(mut self, bytes: usize) -> Self {
+        self.memory_limit = Some(bytes);
+        self
     }
 
     /// Computes the tree edit distance between the source and destination
     /// trees using APTED [1,2].
+    ///
+    /// Panics if the trees are too large or the memory is not available;
+    /// see [`Self::try_compute_edit_distance`] for the checks.
     pub fn compute_edit_distance(&mut self, t1: &'a Node<D>, t2: &'a Node<D>) -> f32 {
+        self.try_compute_edit_distance(t1, t2)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Computes the tree edit distance, first checking that the trees are
+    /// small enough for the algorithm's `f32` node ids, that the estimated
+    /// peak memory is within the limit set with [`Self::with_memory_limit`],
+    /// and that the allocator can provide it. The checks run once, before
+    /// any work, so an oversized input returns an error instead of aborting
+    /// the process on allocation failure.
+    pub fn try_compute_edit_distance(
+        &mut self,
+        t1: &'a Node<D>,
+        t2: &'a Node<D>,
+    ) -> Result<f32, TedError> {
+        let (size1, size2) = (t1.node_count(), t2.node_count());
+        let bytes = estimated_peak_bytes(size1, size2).ok_or(TedError::TooLarge { size1, size2 })?;
+        check_memory(bytes, self.memory_limit)?;
         self.init(t1, t2);
+        self.checked_bytes = bytes;
         let it1 = self.it1.as_ref().unwrap();
         let it2 = self.it2.as_ref().unwrap();
         // Determine the optimal strategy with the heuristic from
@@ -102,7 +166,9 @@ impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
         } else {
             compute_opt_strategy_post_r(it1, it2)
         };
-        self.run(delta)
+        let d = self.run(delta)?;
+        self.distance = Some(d);
+        Ok(d)
     }
 
     /// Testing-only entry point: computes TED with a fixed path type in the
@@ -126,7 +192,9 @@ impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
                 }
             }
         }
-        self.run(delta)
+        let d = self.run(delta).unwrap_or_else(|e| panic!("{e}"));
+        self.distance = Some(d);
+        d
     }
 
     /// Indexes both input trees and stores their sizes.
@@ -137,11 +205,15 @@ impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
         self.size2 = it2.size();
         self.it1 = Some(it1);
         self.it2 = Some(it2);
+        // Results of an earlier pair no longer apply.
+        self.delta = Matrix::default();
+        self.distance = None;
+        self.counter = 0;
     }
 
     /// Initialises the structures for the distance computation and runs GTED
     /// with the strategy stored in `delta`.
-    fn run(&mut self, delta: Matrix) -> f32 {
+    fn run(&mut self, delta: Matrix) -> Result<f32, TedError> {
         let it1 = self.it1.as_ref().unwrap();
         let it2 = self.it2.as_ref().unwrap();
         let max_size = self.size1.max(self.size2) as usize + 1;
@@ -153,12 +225,18 @@ impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
             ft: vec![0; max_size + 1],
             forestdist: Vec::new(),
             counter: 0,
+            memory_limit: self.memory_limit,
+            checked_bytes: self.checked_bytes,
+            error: None,
         };
         work.ted_init(it1, it2);
         let result = work.gted(it1, it2);
         self.counter = work.counter;
         self.delta = work.delta;
-        result
+        match work.error {
+            Some(e) => Err(e),
+            None => Ok(result),
+        }
     }
 
     /// Number of subproblems encountered in the last distance computation.
@@ -171,15 +249,28 @@ impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
     ///
     /// Returns pairs of postorder ids (starting with 1) of mapped nodes.
     /// Deleted and inserted nodes are mapped to 0.
+    ///
+    /// Panics in the cases where [`Self::try_compute_edit_mapping`] returns
+    /// an error.
     pub fn compute_edit_mapping(&self) -> Vec<[i32; 2]> {
-        let it1 = self
-            .it1
-            .as_ref()
-            .expect("compute the distance before the mapping");
-        let it2 = self
-            .it2
-            .as_ref()
-            .expect("compute the distance before the mapping");
+        self.try_compute_edit_mapping()
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Computes the edit mapping, or an error if no distance was computed
+    /// for the current trees, the distance is NaN, or the mapping's
+    /// (n+1)·(m+1) table cannot be allocated.
+    pub fn try_compute_edit_mapping(&self) -> Result<Vec<[i32; 2]>, TedError> {
+        let d = self.distance.ok_or(TedError::DistanceNotComputed)?;
+        if d.is_nan() {
+            return Err(TedError::NotANumber);
+        }
+        let (it1, it2) = match (&self.it1, &self.it2) {
+            (Some(it1), Some(it2)) => (it1, it2),
+            _ => return Err(TedError::DistanceNotComputed),
+        };
+        let floats = (self.size1 as usize + 1) * (self.size2 as usize + 1);
+        check_memory(floats * std::mem::size_of::<f32>(), self.memory_limit)?;
         let cm = &self.cost_model;
         let (size1, size2) = (self.size1, self.size2);
         let mut forestdist = vec![vec![0.0f32; size2 as usize + 1]; size1 as usize + 1];
@@ -202,7 +293,17 @@ impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
             let mut col = last_col;
             while row > first_row || col > first_col {
                 let (r, c) = (row as usize, col as usize);
-                if row > first_row
+                // With an empty subforest on one side the only possible
+                // operation is an insertion or deletion. The float
+                // comparisons below would pick it too, except for NaN costs,
+                // where they would fall through to an out-of-range index.
+                if row == first_row {
+                    edit_mapping.push([0, col]);
+                    col -= 1;
+                } else if col == first_col {
+                    edit_mapping.push([row, 0]);
+                    row -= 1;
+                } else if row > first_row
                     && forestdist[r - 1][c] + cm.del(it1.post_l_to_node(row - 1))
                         == forestdist[r][c]
                 {
@@ -233,7 +334,7 @@ impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
             }
         }
         edit_mapping.reverse();
-        edit_mapping
+        Ok(edit_mapping)
     }
 
     /// Recalculates distances between subforests of two subtrees, used by the
@@ -434,22 +535,22 @@ pub(crate) fn compute_opt_strategy_post_l<D>(
                 min_cost = size_v.max(size_w) as f32;
             } else {
                 let mut tmp_cost =
-                    size_v as f32 * it2.pre_l_to_kr_sum[wp] as f32 + pool.l[row_v][w];
+                    size_v as f32 * it2.pre_l_to_kr_sum[wp] + pool.l[row_v][w];
                 if tmp_cost < min_cost {
                     min_cost = tmp_cost;
                     strategy_path = left_path_v;
                 }
-                tmp_cost = size_v as f32 * it2.pre_l_to_rev_kr_sum[wp] as f32 + pool.r[row_v][w];
+                tmp_cost = size_v as f32 * it2.pre_l_to_rev_kr_sum[wp] + pool.r[row_v][w];
                 if tmp_cost < min_cost {
                     min_cost = tmp_cost;
                     strategy_path = right_path_v;
                 }
-                tmp_cost = size_v as f32 * it2.pre_l_to_desc_sum[wp] as f32 + pool.i[row_v][w];
+                tmp_cost = size_v as f32 * it2.pre_l_to_desc_sum[wp] + pool.i[row_v][w];
                 if tmp_cost < min_cost {
                     min_cost = tmp_cost;
                     strategy_path = strategy[vp][wp] as i32 + 1;
                 }
-                tmp_cost = size_w as f32 * kr_sum_v as f32 + cost2_l[w];
+                tmp_cost = size_w as f32 * kr_sum_v + cost2_l[w];
                 if tmp_cost < min_cost {
                     min_cost = tmp_cost;
                     strategy_path = -(it2.pre_r_to_pre_l
@@ -457,12 +558,12 @@ pub(crate) fn compute_opt_strategy_post_l<D>(
                         + path_id_offset
                         + 1);
                 }
-                tmp_cost = size_w as f32 * revkr_sum_v as f32 + cost2_r[w];
+                tmp_cost = size_w as f32 * revkr_sum_v + cost2_r[w];
                 if tmp_cost < min_cost {
                     min_cost = tmp_cost;
                     strategy_path = w_in_pre_l + size_w - 1 + path_id_offset + 1;
                 }
-                tmp_cost = size_w as f32 * desc_sum_v as f32 + cost2_i[w];
+                tmp_cost = size_w as f32 * desc_sum_v + cost2_i[w];
                 if tmp_cost < min_cost {
                     min_cost = tmp_cost;
                     strategy_path = cost2_path[w] + path_id_offset + 1;
@@ -583,22 +684,22 @@ pub(crate) fn compute_opt_strategy_post_r<D>(
             if size_v <= 1 || size_w <= 1 {
                 min_cost = size_v.max(size_w) as f32;
             } else {
-                let mut tmp_cost = size_v as f32 * it2.pre_l_to_kr_sum[w] as f32 + pool.l[row_v][w];
+                let mut tmp_cost = size_v as f32 * it2.pre_l_to_kr_sum[w] + pool.l[row_v][w];
                 if tmp_cost < min_cost {
                     min_cost = tmp_cost;
                     strategy_path = left_path_v;
                 }
-                tmp_cost = size_v as f32 * it2.pre_l_to_rev_kr_sum[w] as f32 + pool.r[row_v][w];
+                tmp_cost = size_v as f32 * it2.pre_l_to_rev_kr_sum[w] + pool.r[row_v][w];
                 if tmp_cost < min_cost {
                     min_cost = tmp_cost;
                     strategy_path = right_path_v;
                 }
-                tmp_cost = size_v as f32 * it2.pre_l_to_desc_sum[w] as f32 + pool.i[row_v][w];
+                tmp_cost = size_v as f32 * it2.pre_l_to_desc_sum[w] + pool.i[row_v][w];
                 if tmp_cost < min_cost {
                     min_cost = tmp_cost;
                     strategy_path = strategy[v][w] as i32 + 1;
                 }
-                tmp_cost = size_w as f32 * kr_sum_v as f32 + cost2_l[w];
+                tmp_cost = size_w as f32 * kr_sum_v + cost2_l[w];
                 if tmp_cost < min_cost {
                     min_cost = tmp_cost;
                     strategy_path = -(it2.pre_r_to_pre_l
@@ -606,12 +707,12 @@ pub(crate) fn compute_opt_strategy_post_r<D>(
                         + path_id_offset
                         + 1);
                 }
-                tmp_cost = size_w as f32 * revkr_sum_v as f32 + cost2_r[w];
+                tmp_cost = size_w as f32 * revkr_sum_v + cost2_r[w];
                 if tmp_cost < min_cost {
                     min_cost = tmp_cost;
                     strategy_path = wi + size_w - 1 + path_id_offset + 1;
                 }
-                tmp_cost = size_w as f32 * desc_sum_v as f32 + cost2_i[w];
+                tmp_cost = size_w as f32 * desc_sum_v + cost2_i[w];
                 if tmp_cost < min_cost {
                     min_cost = tmp_cost;
                     strategy_path = cost2_path[w] + path_id_offset + 1;
@@ -759,98 +860,117 @@ impl<'c, C> Work<'c, C> {
 
     /// GTED [1, Section 3.4]: decomposes the trees along the strategy paths
     /// and dispatches to the single-path functions.
+    ///
+    /// The Java version recurses into every subtree hanging off a strategy
+    /// path before running the path's single-path function. Here an explicit
+    /// stack of [`GtedFrame`]s replaces the recursion so that deep trees
+    /// cannot overflow the call stack; the order of single-path calls, and
+    /// therefore every result, is unchanged.
     fn gted<D>(&mut self, it1: &NodeIndexer<'_, D>, it2: &NodeIndexer<'_, D>) -> f32
     where
         C: CostModel<D>,
     {
-        let current_subtree1 = it1.current_node();
-        let current_subtree2 = it2.current_node();
-        let subtree_size1 = it1.sizes[current_subtree1 as usize];
-        let subtree_size2 = it2.sizes[current_subtree2 as usize];
-
-        if subtree_size1 == 1 || subtree_size2 == 1 {
-            return self.spf1(it1, current_subtree1, it2, current_subtree2);
-        }
-
-        let strategy_path_id =
-            self.delta[current_subtree1 as usize][current_subtree2 as usize] as i32;
-        let mut current_path_node = strategy_path_id.abs() - 1;
-        let path_id_offset = it1.size();
-
-        if current_path_node < path_id_offset {
-            let strategy_path_type = get_strategy_path_type(
-                strategy_path_id,
-                path_id_offset,
-                current_subtree1,
-                subtree_size1,
-            );
+        let mut stack = match self.gted_enter(it1, it2, it1.current_node(), it2.current_node()) {
+            Ok(frame) => vec![frame],
+            Err(d) => return d,
+        };
+        loop {
+            let f = stack.last_mut().expect("loop exits when the stack empties");
+            let (it, subtree) = if f.in_tree2 {
+                (it2, f.subtree2)
+            } else {
+                (it1, f.subtree1)
+            };
+            // Next subtree hanging off the path, walking up from its end.
+            let mut next = None;
             loop {
-                let parent = it1.parents[current_path_node as usize];
-                if parent < current_subtree1 {
+                let parent = it.parents[f.path_node as usize];
+                if parent < subtree {
                     break;
                 }
-                for &child in &it1.children[parent as usize] {
-                    if child != current_path_node {
-                        it1.set_current_node(child);
-                        self.gted(it1, it2);
+                let children = &it.children[parent as usize];
+                while let Some(&child) = children.get(f.child_idx) {
+                    f.child_idx += 1;
+                    if child != f.path_node {
+                        next = Some(child);
+                        break;
                     }
                 }
-                current_path_node = parent;
+                if next.is_some() {
+                    break;
+                }
+                f.path_node = parent;
+                f.child_idx = 0;
             }
-            it1.set_current_node(current_subtree1);
+            if let Some(child) = next {
+                let (s1, s2) = if f.in_tree2 {
+                    (f.subtree1, child)
+                } else {
+                    (child, f.subtree2)
+                };
+                if let Ok(frame) = self.gted_enter(it1, it2, s1, s2) {
+                    stack.push(frame);
+                }
+                continue;
+            }
 
+            // Every relevant subtree is done: run this path's function.
+            let f = stack.pop().expect("stack is non-empty");
+            it1.set_current_node(f.subtree1);
+            it2.set_current_node(f.subtree2);
             // The flag says whether the input subtrees were swapped compared
             // to the original input order [1, Section 3.4].
-            if strategy_path_type == LEFT {
-                return self.spf_l(it1, it2, false);
+            let d = match (f.in_tree2, f.path_type) {
+                (false, LEFT) => self.spf_l(it1, it2, false),
+                (false, RIGHT) => self.spf_r(it1, it2, false),
+                (false, _) => self.spf_a(it1, it2, f.path_start, f.path_type, false),
+                (true, LEFT) => self.spf_l(it2, it1, true),
+                (true, RIGHT) => self.spf_r(it2, it1, true),
+                (true, _) => self.spf_a(it2, it1, f.path_start, f.path_type, true),
+            };
+            if stack.is_empty() || self.error.is_some() {
+                return d;
             }
-            if strategy_path_type == RIGHT {
-                return self.spf_r(it1, it2, false);
-            }
-            return self.spf_a(
-                it1,
-                it2,
-                strategy_path_id.abs() - 1,
-                strategy_path_type,
-                false,
-            );
         }
+    }
 
-        current_path_node -= path_id_offset;
-        let strategy_path_type = get_strategy_path_type(
-            strategy_path_id,
-            path_id_offset,
-            current_subtree2,
-            subtree_size2,
-        );
-        loop {
-            let parent = it2.parents[current_path_node as usize];
-            if parent < current_subtree2 {
-                break;
-            }
-            for &child in &it2.children[parent as usize] {
-                if child != current_path_node {
-                    it2.set_current_node(child);
-                    self.gted(it1, it2);
-                }
-            }
-            current_path_node = parent;
+    /// Starts GTED on the subtree pair (`subtree1`, `subtree2`): a pair with
+    /// a single-node tree is solved at once with spf1 (`Err` carries its
+    /// distance); otherwise returns the frame that walks its strategy path.
+    fn gted_enter<D>(
+        &mut self,
+        it1: &NodeIndexer<'_, D>,
+        it2: &NodeIndexer<'_, D>,
+        subtree1: i32,
+        subtree2: i32,
+    ) -> Result<GtedFrame, f32>
+    where
+        C: CostModel<D>,
+    {
+        it1.set_current_node(subtree1);
+        it2.set_current_node(subtree2);
+        let subtree_size1 = it1.sizes[subtree1 as usize];
+        let subtree_size2 = it2.sizes[subtree2 as usize];
+        if subtree_size1 == 1 || subtree_size2 == 1 {
+            return Err(self.spf1(it1, subtree1, it2, subtree2));
         }
-        it2.set_current_node(current_subtree2);
-
-        if strategy_path_type == LEFT {
-            return self.spf_l(it2, it1, true);
-        }
-        if strategy_path_type == RIGHT {
-            return self.spf_r(it2, it1, true);
-        }
-        self.spf_a(
-            it2,
-            it1,
-            strategy_path_id.abs() - path_id_offset - 1,
-            strategy_path_type,
-            true,
-        )
+        let strategy_path_id = self.delta[subtree1 as usize][subtree2 as usize] as i32;
+        let path_id_offset = it1.size();
+        let path_node = strategy_path_id.abs() - 1;
+        let (in_tree2, path_node, root, size) = if path_node < path_id_offset {
+            (false, path_node, subtree1, subtree_size1)
+        } else {
+            (true, path_node - path_id_offset, subtree2, subtree_size2)
+        };
+        Ok(GtedFrame {
+            subtree1,
+            subtree2,
+            in_tree2,
+            path_type: get_strategy_path_type(strategy_path_id, path_id_offset, root, size),
+            path_start: path_node,
+            path_node,
+            child_idx: 0,
+        })
     }
 
     /// Reads `delta` for node `f` of the left-hand tree and node `g` of the
@@ -940,6 +1060,24 @@ impl<'c, C> Work<'c, C> {
         let subtree_size2 = it2.sizes[current_subtree_pre_l2 as usize];
         let subtree_size1 = it1.sizes[current_subtree_pre_l1 as usize];
         let w = (subtree_size2 + 1) as usize; // Row width of both s and t.
+        // t is (max(n, m) + 1)² in the worst case, beyond the estimate
+        // checked up front, so check it (with s) before allocating.
+        let tables = w
+            .checked_mul(w)
+            .and_then(|t| t.checked_add((subtree_size1 + 1) as usize * w))
+            .and_then(floats_to_bytes);
+        let checked = match tables {
+            // Within what was checked up front: no second probe needed.
+            Some(bytes) if bytes <= self.checked_bytes => Ok(()),
+            Some(bytes) => check_memory(bytes, self.memory_limit).map(|()| {
+                self.checked_bytes = bytes;
+            }),
+            None => Err(TedError::AllocationFailed { bytes: usize::MAX }),
+        };
+        if let Err(e) = checked {
+            self.error = Some(e);
+            return f32::NAN;
+        }
         let mut t = vec![0.0f32; w * w];
         let mut s = vec![0.0f32; (subtree_size1 + 1) as usize * w];
         let si = |row: i32, col: i32| row as usize * w + col as usize;
@@ -1532,11 +1670,7 @@ impl<'c, C> Work<'c, C> {
         let size1 = it1.sizes[c1 as usize] as usize;
         let size2 = it2.sizes[c2 as usize] as usize;
         let mut key_roots = vec![-1i32; size2];
-        let first_key_root = if right {
-            compute_rev_key_roots(it2, c2, it2.pre_l_to_rld(c2), &mut key_roots, 0)
-        } else {
-            compute_key_roots(it2, c2, it2.pre_l_to_lld(c2), &mut key_roots, 0)
-        };
+        let first_key_root = compute_key_roots(it2, c2, &mut key_roots, right);
         let width = size2 + 1;
         let mut forestdist = std::mem::take(&mut self.forestdist);
         forestdist.clear();
@@ -1728,57 +1862,51 @@ impl<'c, C> Work<'c, C> {
     }
 }
 
-/// Stores the keyroot nodes for left paths of the subtree rooted at
-/// `subtree_root_node` into `key_roots`, starting at `index`. Returns the
-/// index after the last stored keyroot.
+/// Stores the keyroot nodes of the subtree rooted at `subtree_root_node`
+/// into `key_roots`: the root, then recursively every sibling of a node on
+/// its left path (right path if `right`), in the order of the Java
+/// recursion. Returns the number of keyroots stored. Iterative, so deep
+/// trees cannot overflow the call stack.
 fn compute_key_roots<D>(
     it2: &NodeIndexer<'_, D>,
     subtree_root_node: i32,
-    path_id: i32,
     key_roots: &mut [i32],
-    mut index: usize,
+    right: bool,
 ) -> usize {
-    key_roots[index] = subtree_root_node;
-    index += 1;
-    let mut path_node = path_id;
-    while path_node > subtree_root_node {
-        let parent = it2.parents[path_node as usize];
-        // Every sibling of a path node is a keyroot.
-        for &child in &it2.children[parent as usize] {
-            if child != path_node {
-                index = compute_key_roots(it2, child, it2.pre_l_to_lld(child), key_roots, index);
+    let leaf = |node: i32| {
+        if right {
+            it2.pre_l_to_rld(node)
+        } else {
+            it2.pre_l_to_lld(node)
+        }
+    };
+    // (subtree root, current path node, next child of its parent to visit)
+    let mut stack = vec![(subtree_root_node, leaf(subtree_root_node), 0usize)];
+    key_roots[0] = subtree_root_node;
+    let mut index = 1;
+    while let Some((root, path_node, child_idx)) = stack.last_mut() {
+        if *path_node <= *root {
+            stack.pop();
+            continue;
+        }
+        let parent = it2.parents[*path_node as usize];
+        match it2.children[parent as usize][*child_idx..]
+            .iter()
+            .position(|&c| c != *path_node)
+        {
+            Some(offset) => {
+                // Every sibling of a path node is a keyroot.
+                let child = it2.children[parent as usize][*child_idx + offset];
+                *child_idx += offset + 1;
+                key_roots[index] = child;
+                index += 1;
+                stack.push((child, leaf(child), 0));
+            }
+            None => {
+                *path_node = parent;
+                *child_idx = 0;
             }
         }
-        path_node = parent;
-    }
-    index
-}
-
-/// Right-path counterpart of [`compute_key_roots`].
-fn compute_rev_key_roots<D>(
-    it2: &NodeIndexer<'_, D>,
-    subtree_root_node: i32,
-    path_id: i32,
-    rev_key_roots: &mut [i32],
-    mut index: usize,
-) -> usize {
-    rev_key_roots[index] = subtree_root_node;
-    index += 1;
-    let mut path_node = path_id;
-    while path_node > subtree_root_node {
-        let parent = it2.parents[path_node as usize];
-        for &child in &it2.children[parent as usize] {
-            if child != path_node {
-                index = compute_rev_key_roots(
-                    it2,
-                    child,
-                    it2.pre_l_to_rld(child),
-                    rev_key_roots,
-                    index,
-                );
-            }
-        }
-        path_node = parent;
     }
     index
 }

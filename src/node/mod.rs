@@ -7,7 +7,10 @@ use std::fmt;
 pub use node_indexer::NodeIndexer;
 
 /// A tree node holding data of type `D` and an ordered list of children.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Every operation that walks the tree (`node_count`, `Clone`, `PartialEq`,
+/// `Debug`, `Display`, `Drop`) is iterative, so arbitrarily deep trees
+/// cannot overflow the stack.
 pub struct Node<D> {
     node_data: D,
     children: Vec<Node<D>>,
@@ -23,7 +26,13 @@ impl<D> Node<D> {
 
     /// Number of nodes in the subtree rooted at this node.
     pub fn node_count(&self) -> usize {
-        1 + self.children.iter().map(Node::node_count).sum::<usize>()
+        let mut count = 0;
+        let mut stack = vec![self];
+        while let Some(n) = stack.pop() {
+            count += 1;
+            stack.extend(n.children.iter());
+        }
+        count
     }
 
     pub fn add_child(&mut self, c: Node<D>) {
@@ -43,14 +52,117 @@ impl<D> Node<D> {
     }
 }
 
-/// Renders the tree in bracket notation, e.g. `{a{b}{c}}`.
+/// Drops descendants from an explicit stack instead of recursively.
+impl<D> Drop for Node<D> {
+    fn drop(&mut self) {
+        if self.children.is_empty() {
+            return;
+        }
+        let mut stack = std::mem::take(&mut self.children);
+        while let Some(mut n) = stack.pop() {
+            stack.append(&mut n.children);
+        }
+    }
+}
+
+impl<D: Clone> Clone for Node<D> {
+    fn clone(&self) -> Self {
+        // `open` holds the source nodes whose children are being copied and
+        // the next child to copy; `built` the copies under construction.
+        let mut open: Vec<(&Node<D>, usize)> = vec![(self, 0)];
+        let mut built: Vec<Node<D>> = vec![self.shallow_clone()];
+        loop {
+            let (src, next) = open.last_mut().expect("root stays open until returned");
+            if let Some(child) = src.children.get(*next) {
+                *next += 1;
+                open.push((child, 0));
+                built.push(child.shallow_clone());
+            } else {
+                open.pop();
+                let done = built.pop().expect("one copy per open node");
+                match built.last_mut() {
+                    Some(parent) => parent.children.push(done),
+                    None => return done,
+                }
+            }
+        }
+    }
+}
+
+impl<D: Clone> Node<D> {
+    fn shallow_clone(&self) -> Self {
+        Node {
+            node_data: self.node_data.clone(),
+            children: Vec::with_capacity(self.children.len()),
+        }
+    }
+}
+
+impl<D: PartialEq> PartialEq for Node<D> {
+    fn eq(&self, other: &Self) -> bool {
+        let mut stack = vec![(self, other)];
+        while let Some((a, b)) = stack.pop() {
+            if a.node_data != b.node_data || a.children.len() != b.children.len() {
+                return false;
+            }
+            stack.extend(a.children.iter().zip(b.children.iter()));
+        }
+        true
+    }
+}
+
+impl<D: Eq> Eq for Node<D> {}
+
+/// Writes the tree in preorder as `{data{child}...}`, calling `label` for
+/// each node's data.
+fn write_bracketed<D>(
+    root: &Node<D>,
+    f: &mut fmt::Formatter<'_>,
+    mut label: impl FnMut(&D, &mut fmt::Formatter<'_>) -> fmt::Result,
+) -> fmt::Result {
+    enum Step<'a, D> {
+        Open(&'a Node<D>),
+        Close,
+    }
+    let mut stack = vec![Step::Open(root)];
+    while let Some(step) = stack.pop() {
+        match step {
+            Step::Open(n) => {
+                f.write_str("{")?;
+                label(&n.node_data, f)?;
+                stack.push(Step::Close);
+                stack.extend(n.children.iter().rev().map(Step::Open));
+            }
+            Step::Close => f.write_str("}")?,
+        }
+    }
+    Ok(())
+}
+
+/// Shows the tree in bracket notation with each node's data in `Debug`
+/// form, e.g. `Node({"a"{"b"}})`.
+impl<D: fmt::Debug> fmt::Debug for Node<D> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Node(")?;
+        write_bracketed(self, f, |d, f| write!(f, "{d:?}"))?;
+        f.write_str(")")
+    }
+}
+
+/// Renders the tree in bracket notation, e.g. `{a{b}{c}}`. Braces and
+/// backslashes in labels are escaped with a backslash, so the output parses
+/// back to the same tree with [`crate::BracketStringInputParser`].
 impl fmt::Display for Node<StringNodeData> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{{{}", self.node_data.label())?;
-        for child in &self.children {
-            write!(f, "{child}")?;
-        }
-        write!(f, "}}")
+        write_bracketed(self, f, |d, f| {
+            for c in d.label().chars() {
+                if matches!(c, '{' | '}' | '\\') {
+                    f.write_str("\\")?;
+                }
+                write!(f, "{c}")?;
+            }
+            Ok(())
+        })
     }
 }
 

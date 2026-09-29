@@ -36,12 +36,14 @@ pub struct NodeIndexer<'a, D> {
     pub post_l_to_pre_l: Vec<i32>,
     pub pre_l_to_post_r: Vec<i32>,
     pub post_r_to_pre_l: Vec<i32>,
-    /// Cost of the spf_L single-path function per subtree.
-    pub pre_l_to_kr_sum: Vec<i32>,
+    /// Cost of the spf_L single-path function per subtree. The three cost
+    /// arrays are summed in `i64` and stored as `f32`, the type the strategy
+    /// computation uses; `i32` sums (as in Java) overflow above ~46k nodes.
+    pub pre_l_to_kr_sum: Vec<f32>,
     /// Cost of the spf_R single-path function per subtree.
-    pub pre_l_to_rev_kr_sum: Vec<i32>,
+    pub pre_l_to_rev_kr_sum: Vec<f32>,
     /// Cost of the spf_A single-path function per subtree.
-    pub pre_l_to_desc_sum: Vec<i32>,
+    pub pre_l_to_desc_sum: Vec<f32>,
     /// Cost of deleting every node of the subtree.
     pub pre_l_to_sum_del_cost: Vec<f32>,
     /// Cost of inserting every node of the subtree.
@@ -54,14 +56,32 @@ pub struct NodeIndexer<'a, D> {
     tree_size: i32,
 }
 
-/// Scratch values passed between recursive calls of `index_nodes`.
-#[derive(Default)]
-struct Tmp {
-    size: i32,
-    desc_sizes: i32,
-    kr_sizes_sum: i32,
-    revkr_sizes_sum: i32,
+/// A node of `index_nodes`' explicit traversal stack, with the sums
+/// accumulated over the children finished so far.
+struct Frame<'a, D> {
+    node: &'a Node<D>,
     preorder: i32,
+    next_child: usize,
+    children_preorders: Vec<i32>,
+    current_size: i64,
+    desc_sizes: i64,
+    kr_sizes_sum: i64,
+    revkr_sizes_sum: i64,
+}
+
+impl<'a, D> Frame<'a, D> {
+    fn new(node: &'a Node<D>, preorder: i32) -> Self {
+        Frame {
+            node,
+            preorder,
+            next_child: 0,
+            children_preorders: Vec::with_capacity(node.children().len()),
+            current_size: 0,
+            desc_sizes: 0,
+            kr_sizes_sum: 0,
+            revkr_sizes_sum: 0,
+        }
+    }
 }
 
 impl<'a, D> NodeIndexer<'a, D> {
@@ -84,9 +104,9 @@ impl<'a, D> NodeIndexer<'a, D> {
             post_l_to_pre_l: vec![0; n],
             pre_l_to_post_r: vec![0; n],
             post_r_to_pre_l: vec![0; n],
-            pre_l_to_kr_sum: vec![0; n],
-            pre_l_to_rev_kr_sum: vec![0; n],
-            pre_l_to_desc_sum: vec![0; n],
+            pre_l_to_kr_sum: vec![0.0; n],
+            pre_l_to_rev_kr_sum: vec![0.0; n],
+            pre_l_to_desc_sum: vec![0.0; n],
             pre_l_to_sum_del_cost: vec![0.0; n],
             pre_l_to_sum_ins_cost: vec![0.0; n],
             lchl: 0,
@@ -96,8 +116,7 @@ impl<'a, D> NodeIndexer<'a, D> {
         };
         ni.parents[0] = -1; // The root has no parent.
         let mut nodes: Vec<Option<&'a Node<D>>> = vec![None; n];
-        let mut tmp = Tmp::default();
-        ni.index_nodes(input_tree, -1, &mut tmp, &mut nodes);
+        ni.index_nodes(input_tree, &mut nodes);
         ni.pre_l_to_node = nodes
             .into_iter()
             .map(|x| x.expect("every node indexed"))
@@ -106,67 +125,65 @@ impl<'a, D> NodeIndexer<'a, D> {
         ni
     }
 
-    /// Indexes the nodes of the subtree rooted at `node` recursively. Returns
-    /// the postorder id of `node`.
-    fn index_nodes(
-        &mut self,
-        node: &'a Node<D>,
-        mut postorder: i32,
-        tmp: &mut Tmp,
-        nodes: &mut [Option<&'a Node<D>>],
-    ) -> i32 {
-        let mut current_size = 0;
-        let mut children_count = 0;
-        let mut desc_sizes = 0;
-        let mut kr_sizes_sum = 0;
-        let mut revkr_sizes_sum = 0;
-        let preorder = tmp.preorder;
-        let mut children_preorders = Vec::with_capacity(node.children().len());
-        tmp.preorder += 1;
-        let n_children = node.children().len();
-        for (idx, child) in node.children().iter().enumerate() {
-            children_count += 1;
-            let current_preorder = tmp.preorder;
-            self.parents[current_preorder as usize] = preorder;
-            postorder = self.index_nodes(child, postorder, tmp, nodes);
-            children_preorders.push(current_preorder);
-            current_size += 1 + tmp.size;
-            desc_sizes += tmp.desc_sizes;
-            if children_count > 1 {
-                kr_sizes_sum += tmp.kr_sizes_sum + tmp.size + 1;
-            } else {
-                kr_sizes_sum += tmp.kr_sizes_sum;
-                self.node_type_l[current_preorder as usize] = true;
+    /// Indexes every node in one depth-first traversal. Iterative (an
+    /// explicit stack of [`Frame`]s replaces the Java recursion), so any tree
+    /// depth is safe; the arithmetic matches the recursive original.
+    fn index_nodes(&mut self, root: &'a Node<D>, nodes: &mut [Option<&'a Node<D>>]) {
+        let mut postorder: i32 = -1;
+        let mut next_preorder: i32 = 1;
+        let mut stack = vec![Frame::new(root, 0)];
+        while let Some(top) = stack.last_mut() {
+            if let Some(child) = top.node.children().get(top.next_child) {
+                top.next_child += 1;
+                let child_preorder = next_preorder;
+                next_preorder += 1;
+                self.parents[child_preorder as usize] = top.preorder;
+                top.children_preorders.push(child_preorder);
+                stack.push(Frame::new(child, child_preorder));
+                continue;
             }
-            if idx + 1 < n_children {
-                revkr_sizes_sum += tmp.revkr_sizes_sum + tmp.size + 1;
-            } else {
-                revkr_sizes_sum += tmp.revkr_sizes_sum;
-                self.node_type_r[current_preorder as usize] = true;
+
+            // All children done: finish this node.
+            let f = stack.pop().expect("stack is non-empty");
+            postorder += 1;
+            let preorder = f.preorder;
+            let p = preorder as usize;
+            let current_size = f.current_size;
+            let current_desc_sizes = f.desc_sizes + current_size + 1;
+            self.pre_l_to_desc_sum[p] =
+                (((current_size + 1) * (current_size + 1 + 3)) / 2 - current_desc_sizes) as f32;
+            self.pre_l_to_kr_sum[p] = (f.kr_sizes_sum + current_size + 1) as f32;
+            self.pre_l_to_rev_kr_sum[p] = (f.revkr_sizes_sum + current_size + 1) as f32;
+            nodes[p] = Some(f.node);
+            self.sizes[p] = (current_size + 1) as i32;
+            let preorder_r = self.tree_size - 1 - postorder;
+            self.pre_l_to_pre_r[p] = preorder_r;
+            self.pre_r_to_pre_l[preorder_r as usize] = preorder;
+            self.children[p] = f.children_preorders;
+            self.post_l_to_pre_l[postorder as usize] = preorder;
+            self.pre_l_to_post_l[p] = postorder;
+            self.pre_l_to_post_r[p] = self.tree_size - 1 - preorder;
+            self.post_r_to_pre_l[(self.tree_size - 1 - preorder) as usize] = preorder;
+
+            // Add this subtree's sums to its parent.
+            if let Some(parent) = stack.last_mut() {
+                let idx = parent.next_child - 1; // position among siblings
+                parent.current_size += 1 + current_size;
+                parent.desc_sizes += current_desc_sizes;
+                if idx > 0 {
+                    parent.kr_sizes_sum += f.kr_sizes_sum + current_size + 1;
+                } else {
+                    parent.kr_sizes_sum += f.kr_sizes_sum;
+                    self.node_type_l[p] = true;
+                }
+                if idx + 1 < parent.node.children().len() {
+                    parent.revkr_sizes_sum += f.revkr_sizes_sum + current_size + 1;
+                } else {
+                    parent.revkr_sizes_sum += f.revkr_sizes_sum;
+                    self.node_type_r[p] = true;
+                }
             }
         }
-        postorder += 1;
-        let p = preorder as usize;
-        let current_desc_sizes = desc_sizes + current_size + 1;
-        self.pre_l_to_desc_sum[p] =
-            ((current_size + 1) * (current_size + 1 + 3)) / 2 - current_desc_sizes;
-        self.pre_l_to_kr_sum[p] = kr_sizes_sum + current_size + 1;
-        self.pre_l_to_rev_kr_sum[p] = revkr_sizes_sum + current_size + 1;
-        nodes[p] = Some(node);
-        self.sizes[p] = current_size + 1;
-        let preorder_r = self.tree_size - 1 - postorder;
-        self.pre_l_to_pre_r[p] = preorder_r;
-        self.pre_r_to_pre_l[preorder_r as usize] = preorder;
-        self.children[p] = children_preorders;
-        tmp.desc_sizes = current_desc_sizes;
-        tmp.size = current_size;
-        tmp.kr_sizes_sum = kr_sizes_sum;
-        tmp.revkr_sizes_sum = revkr_sizes_sum;
-        self.post_l_to_pre_l[postorder as usize] = preorder;
-        self.pre_l_to_post_l[p] = postorder;
-        self.pre_l_to_post_r[p] = self.tree_size - 1 - preorder;
-        self.post_r_to_pre_l[(self.tree_size - 1 - preorder) as usize] = preorder;
-        postorder
     }
 
     /// Computes the arrays that need the traversal orders built by

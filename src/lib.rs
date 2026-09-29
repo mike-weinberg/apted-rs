@@ -10,10 +10,12 @@
 
 pub mod cost_model;
 pub mod distance;
+pub mod error;
 pub mod node;
 pub mod parser;
 
 pub use cost_model::{CostModel, PerEditOperationStringNodeDataCostModel, StringUnitCostModel};
 pub use distance::{AllPossibleMappingsTED, APTED};
 pub use node::{Node, NodeIndexer, StringNodeData};
-pub use parser::BracketStringInputParser;
+pub use error::{estimated_peak_bytes, TedError};
+pub use parser::{BracketStringInputParser, ParseError};
