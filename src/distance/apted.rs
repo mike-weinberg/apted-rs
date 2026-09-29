@@ -710,7 +710,9 @@ impl<'c, C> Work<'c, C> {
             let n1 = ni1.pre_l_to_node[r1];
             let mut cost = ni2.pre_l_to_sum_ins_cost[r2];
             let max_cost = cost + cm.del(n1);
-            let mut min_ren_minus_ins = cost;
+            // Upstream starts at `cost`, which undercounts when renames are
+            // expensive; see tests/regressions.rs.
+            let mut min_ren_minus_ins = f32::INFINITY;
             for i in r2..r2 + subtree_size2 as usize {
                 let n2 = ni2.pre_l_to_node[i];
                 let node_ren_minus_ins = cm.ren(n1, n2) - cm.ins(n2);
@@ -725,7 +727,8 @@ impl<'c, C> Work<'c, C> {
             let n2 = ni2.pre_l_to_node[r2];
             let mut cost = ni1.pre_l_to_sum_del_cost[r1];
             let max_cost = cost + cm.ins(n2);
-            let mut min_ren_minus_del = cost;
+            // Upstream starts at `cost`; see tests/regressions.rs.
+            let mut min_ren_minus_del = f32::INFINITY;
             for i in r1..r1 + subtree_size1 as usize {
                 let n1 = ni1.pre_l_to_node[i];
                 let node_ren_minus_del = cm.ren(n1, n2) - cm.del(n1);
