@@ -1,0 +1,10 @@
+random-random    n=1000   d=1204     median=   111.86 ms
+left-left        n=1000   d=906      median=    19.62 ms
+right-right      n=1000   d=907      median=    19.71 ms
+binary-binary    n=1000   d=950      median=   173.71 ms
+zigzag-zigzag    n=1000   d=925      median=  1045.57 ms
+flat-flat        n=1000   d=854      median=    23.05 ms
+left-right       n=1000   d=1422     median=   937.04 ms
+zigzag-binary    n=1000   d=1422     median=  1565.14 ms
+random-zigzag    n=1000   d=1400     median=  1031.92 ms
+ALL              total median=  4927.61 ms

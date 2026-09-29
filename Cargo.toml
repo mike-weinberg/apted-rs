@@ -6,3 +6,8 @@ description = "Rust port of APTED, the tree edit distance algorithm by Pawlik an
 license = "MIT"
 
 [dependencies]
+
+# Release build with symbols, for sampling profilers.
+[profile.profiling]
+inherits = "release"
+debug = true

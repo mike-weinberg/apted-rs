@@ -20,6 +20,7 @@
 //! and the reuse of the `delta` matrix for both the strategy and the subtree
 //! distances, so that results match the reference implementation exactly.
 
+use super::matrix::Matrix;
 use crate::cost_model::CostModel;
 use crate::node::{Node, NodeIndexer};
 
@@ -42,7 +43,7 @@ pub struct APTED<'a, C, D> {
     size2: i32,
     /// The distance matrix [1, Sections 3.4,8.2,8.3]. Holds the strategy
     /// first, then intermediate distances between pairs of subtrees.
-    delta: Vec<Vec<f32>>,
+    delta: Matrix,
     /// Number of subproblems encountered while computing the distance
     /// [1, Section 10].
     counter: u64,
@@ -52,14 +53,27 @@ pub struct APTED<'a, C, D> {
 /// indexers so both indexers can be borrowed while the state is mutated.
 struct Work<'c, C> {
     cost_model: &'c C,
-    delta: Vec<Vec<f32>>,
+    delta: Matrix,
     /// One of distance arrays to store intermediate distances in spfA.
     q: Vec<f32>,
     /// Array used in the algorithm before [1] (see [1, Section 8.4]).
     fn_: Vec<i32>,
     /// Array used in the algorithm before [1] (see [1, Section 8.4]).
     ft: Vec<i32>,
+    /// Reused forest distance matrix of spfL and spfR (row-major).
+    forestdist: Vec<f32>,
     counter: u64,
+}
+
+/// Per-column data of the spfL/spfR inner loop.
+struct Column<'n, D> {
+    node: &'n Node<D>,
+    ins: f32,
+    /// Offset of this column's node in `delta`, completed by the row's
+    /// offset (accounts for swapped input order).
+    delta: usize,
+    leaf: usize,
+    is_tree: bool,
 }
 
 impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
@@ -70,7 +84,7 @@ impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
             it2: None,
             size1: 0,
             size2: 0,
-            delta: Vec::new(),
+            delta: Matrix::default(),
             counter: 0,
         }
     }
@@ -102,8 +116,8 @@ impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
     ) -> f32 {
         self.init(t1, t2);
         let it1 = self.it1.as_ref().unwrap();
-        let mut delta = vec![vec![0.0f32; self.size2 as usize]; self.size1 as usize];
-        for (i, row) in delta.iter_mut().enumerate() {
+        let mut delta = Matrix::new(self.size1 as usize, self.size2 as usize);
+        for (i, row) in delta.rows_mut().enumerate() {
             for cell in row.iter_mut() {
                 if spf_type == LEFT as i32 {
                     *cell = (it1.pre_l_to_lld(i as i32) + 1) as f32;
@@ -127,7 +141,7 @@ impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
 
     /// Initialises the structures for the distance computation and runs GTED
     /// with the strategy stored in `delta`.
-    fn run(&mut self, delta: Vec<Vec<f32>>) -> f32 {
+    fn run(&mut self, delta: Matrix) -> f32 {
         let it1 = self.it1.as_ref().unwrap();
         let it2 = self.it2.as_ref().unwrap();
         let max_size = self.size1.max(self.size2) as usize + 1;
@@ -137,6 +151,7 @@ impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
             q: vec![0.0; max_size],
             fn_: vec![0; max_size + 1],
             ft: vec![0; max_size + 1],
+            forestdist: Vec::new(),
             counter: 0,
         };
         work.ted_init(it1, it2);
@@ -336,13 +351,13 @@ impl RowPool {
 
 /// Computes the optimal strategy using left-to-right postorder traversal of
 /// the nodes [2, Algorithm 1].
-pub fn compute_opt_strategy_post_l<D>(
+pub(crate) fn compute_opt_strategy_post_l<D>(
     it1: &NodeIndexer<'_, D>,
     it2: &NodeIndexer<'_, D>,
-) -> Vec<Vec<f32>> {
+) -> Matrix {
     let size1 = it1.size() as usize;
     let size2 = it2.size() as usize;
-    let mut strategy = vec![vec![0.0f32; size2]; size1];
+    let mut strategy = Matrix::new(size1, size2);
     // Row of the pool holding the costs of each node (by postorder id).
     let mut cost1: Vec<Option<usize>> = vec![None; size1];
     let mut pool = RowPool::new(size2);
@@ -502,13 +517,13 @@ pub fn compute_opt_strategy_post_l<D>(
 
 /// Computes the optimal strategy using right-to-left postorder traversal of
 /// the nodes [2, Algorithm 1].
-pub fn compute_opt_strategy_post_r<D>(
+pub(crate) fn compute_opt_strategy_post_r<D>(
     it1: &NodeIndexer<'_, D>,
     it2: &NodeIndexer<'_, D>,
-) -> Vec<Vec<f32>> {
+) -> Matrix {
     let size1 = it1.size() as usize;
     let size2 = it2.size() as usize;
-    let mut strategy = vec![vec![0.0f32; size2]; size1];
+    let mut strategy = Matrix::new(size1, size2);
     // Row of the pool holding the costs of each node (by preorder id).
     let mut cost1: Vec<Option<usize>> = vec![None; size1];
     let mut pool = RowPool::new(size2);
@@ -843,9 +858,9 @@ impl<'c, C> Work<'c, C> {
     #[inline]
     fn delta_at(&self, f: i32, g: i32, trees_swapped: bool) -> f32 {
         if trees_swapped {
-            self.delta[g as usize][f as usize]
+            self.delta.get(g as usize, f as usize)
         } else {
-            self.delta[f as usize][g as usize]
+            self.delta.get(f as usize, g as usize)
         }
     }
 
@@ -854,9 +869,9 @@ impl<'c, C> Work<'c, C> {
     #[inline]
     fn set_delta(&mut self, f: i32, g: i32, trees_swapped: bool, value: f32) {
         if trees_swapped {
-            self.delta[g as usize][f as usize] = value;
+            self.delta.set(g as usize, f as usize, value);
         } else {
-            self.delta[f as usize][g as usize] = value;
+            self.delta.set(f as usize, g as usize, value);
         }
     }
 
@@ -1481,93 +1496,7 @@ impl<'c, C> Work<'c, C> {
     where
         C: CostModel<D>,
     {
-        let c2 = it2.current_node();
-        let c1 = it1.current_node();
-        let mut key_roots = vec![-1i32; it2.sizes[c2 as usize] as usize];
-        let path_id = it2.pre_l_to_lld(c2);
-        let first_key_root = compute_key_roots(it2, c2, path_id, &mut key_roots, 0);
-        let mut forestdist = vec![
-            vec![0.0f32; it2.sizes[c2 as usize] as usize + 1];
-            it1.sizes[c1 as usize] as usize + 1
-        ];
-        // In the left-hand subtree only the root is a keyroot, so compute the
-        // distance between it and every keyroot of the right-hand subtree.
-        for i in (0..first_key_root).rev() {
-            self.tree_edit_dist(it1, it2, c1, key_roots[i], &mut forestdist, trees_swapped);
-        }
-        forestdist[it1.sizes[c1 as usize] as usize][it2.sizes[c2 as usize] as usize]
-    }
-
-    /// Core of spfL: fills `forestdist` with distances of subforest pairs.
-    fn tree_edit_dist<D>(
-        &mut self,
-        it1: &NodeIndexer<'_, D>,
-        it2: &NodeIndexer<'_, D>,
-        it1subtree: i32,
-        it2subtree: i32,
-        forestdist: &mut [Vec<f32>],
-        trees_swapped: bool,
-    ) where
-        C: CostModel<D>,
-    {
-        let cm = self.cost_model;
-        let del_f = |n: &Node<D>| if trees_swapped { cm.ins(n) } else { cm.del(n) };
-        let ins_g = |n: &Node<D>| if trees_swapped { cm.del(n) } else { cm.ins(n) };
-        let i = it1.pre_l_to_post_l[it1subtree as usize];
-        let j = it2.pre_l_to_post_l[it2subtree as usize];
-        // Offsets so that forestdist indices start at 0.
-        let ioff = it1.post_l_to_lld[i as usize] - 1;
-        let joff = it2.post_l_to_lld[j as usize] - 1;
-        forestdist[0][0] = 0.0;
-        for i1 in 1..=(i - ioff) {
-            forestdist[i1 as usize][0] =
-                forestdist[(i1 - 1) as usize][0] + del_f(it1.post_l_to_node(i1 + ioff));
-        }
-        for j1 in 1..=(j - joff) {
-            forestdist[0][j1 as usize] =
-                forestdist[0][(j1 - 1) as usize] + ins_g(it2.post_l_to_node(j1 + joff));
-        }
-        for i1 in 1..=(i - ioff) {
-            for j1 in 1..=(j - joff) {
-                self.counter += 1;
-                let (a, b) = (i1 as usize, j1 as usize);
-                let n1 = it1.post_l_to_node(i1 + ioff);
-                let n2 = it2.post_l_to_node(j1 + joff);
-                let u = if trees_swapped {
-                    cm.ren(n2, n1)
-                } else {
-                    cm.ren(n1, n2)
-                };
-                let da = forestdist[a - 1][b] + del_f(n1);
-                let db = forestdist[a][b - 1] + ins_g(n2);
-                let dc;
-                let f = it1.post_l_to_pre_l[(i1 + ioff) as usize];
-                let g = it2.post_l_to_pre_l[(j1 + joff) as usize];
-                if it1.post_l_to_lld[(i1 + ioff) as usize] == it1.post_l_to_lld[i as usize]
-                    && it2.post_l_to_lld[(j1 + joff) as usize] == it2.post_l_to_lld[j as usize]
-                {
-                    // Both subforests are subtrees.
-                    dc = forestdist[a - 1][b - 1] + u;
-                    self.set_delta(f, g, trees_swapped, forestdist[a - 1][b - 1]);
-                } else {
-                    dc = forestdist[(it1.post_l_to_lld[(i1 + ioff) as usize] - 1 - ioff) as usize]
-                        [(it2.post_l_to_lld[(j1 + joff) as usize] - 1 - joff) as usize]
-                        + self.delta_at(f, g, trees_swapped)
-                        + u;
-                }
-                forestdist[a][b] = if da >= db {
-                    if db >= dc {
-                        dc
-                    } else {
-                        db
-                    }
-                } else if da >= dc {
-                    dc
-                } else {
-                    da
-                };
-            }
-        }
+        self.spf_lr(it1, it2, trees_swapped, false)
     }
 
     /// Single-path function for right paths [1, Sections 3.3,3.4,3.5].
@@ -1580,84 +1509,188 @@ impl<'c, C> Work<'c, C> {
     where
         C: CostModel<D>,
     {
+        self.spf_lr(it1, it2, trees_swapped, true)
+    }
+
+    /// spfL (`right == false`) and spfR (`right == true`). Both run Zhang and
+    /// Shasha's algorithm; spfR uses right-to-left orders and rightmost
+    /// leaves. In the left-hand subtree only the root is a keyroot, so the
+    /// distance between it and every keyroot of the right-hand subtree is
+    /// computed.
+    fn spf_lr<D>(
+        &mut self,
+        it1: &NodeIndexer<'_, D>,
+        it2: &NodeIndexer<'_, D>,
+        trees_swapped: bool,
+        right: bool,
+    ) -> f32
+    where
+        C: CostModel<D>,
+    {
         let c2 = it2.current_node();
         let c1 = it1.current_node();
-        let mut rev_key_roots = vec![-1i32; it2.sizes[c2 as usize] as usize];
-        let path_id = it2.pre_l_to_rld(c2);
-        let first_key_root = compute_rev_key_roots(it2, c2, path_id, &mut rev_key_roots, 0);
-        let mut forestdist = vec![
-            vec![0.0f32; it2.sizes[c2 as usize] as usize + 1];
-            it1.sizes[c1 as usize] as usize + 1
-        ];
+        let size1 = it1.sizes[c1 as usize] as usize;
+        let size2 = it2.sizes[c2 as usize] as usize;
+        let mut key_roots = vec![-1i32; size2];
+        let first_key_root = if right {
+            compute_rev_key_roots(it2, c2, it2.pre_l_to_rld(c2), &mut key_roots, 0)
+        } else {
+            compute_key_roots(it2, c2, it2.pre_l_to_lld(c2), &mut key_roots, 0)
+        };
+        let width = size2 + 1;
+        let mut forestdist = std::mem::take(&mut self.forestdist);
+        forestdist.clear();
+        forestdist.resize((size1 + 1) * width, 0.0);
         for i in (0..first_key_root).rev() {
-            self.rev_tree_edit_dist(
+            self.tree_edit_dist(
                 it1,
                 it2,
                 c1,
-                rev_key_roots[i],
+                key_roots[i],
                 &mut forestdist,
+                width,
                 trees_swapped,
+                right,
             );
         }
-        forestdist[it1.sizes[c1 as usize] as usize][it2.sizes[c2 as usize] as usize]
+        let result = forestdist[size1 * width + size2];
+        self.forestdist = forestdist;
+        result
     }
 
-    /// Core of spfR: fills `forestdist` with distances of subforest pairs.
-    fn rev_tree_edit_dist<D>(
+    /// Core of spfL/spfR: fills `forestdist` (row-major, `width` columns)
+    /// with distances of subforest pairs, in left-to-right postorder for
+    /// spfL and right-to-left postorder for spfR. Per-row and per-column
+    /// values are computed once, outside the inner loop.
+    #[allow(clippy::too_many_arguments)]
+    fn tree_edit_dist<D>(
         &mut self,
         it1: &NodeIndexer<'_, D>,
         it2: &NodeIndexer<'_, D>,
         it1subtree: i32,
         it2subtree: i32,
-        forestdist: &mut [Vec<f32>],
+        forestdist: &mut [f32],
+        width: usize,
         trees_swapped: bool,
+        right: bool,
     ) where
         C: CostModel<D>,
     {
         let cm = self.cost_model;
         let del_f = |n: &Node<D>| if trees_swapped { cm.ins(n) } else { cm.del(n) };
         let ins_g = |n: &Node<D>| if trees_swapped { cm.del(n) } else { cm.ins(n) };
-        let i = it1.pre_l_to_post_r[it1subtree as usize];
-        let j = it2.pre_l_to_post_r[it2subtree as usize];
-        let ioff = it1.post_r_to_rld[i as usize] - 1;
-        let joff = it2.post_r_to_rld[j as usize] - 1;
-        forestdist[0][0] = 0.0;
-        for i1 in 1..=(i - ioff) {
-            forestdist[i1 as usize][0] =
-                forestdist[(i1 - 1) as usize][0] + del_f(it1.post_r_to_node(i1 + ioff));
+        // post_to_pre, post_to_leaf (lld or rld), pre_to_post per direction.
+        let (post_to_pre1, leaf1, pre_to_post1) = if right {
+            (
+                &it1.post_r_to_pre_l,
+                &it1.post_r_to_rld,
+                &it1.pre_l_to_post_r,
+            )
+        } else {
+            (
+                &it1.post_l_to_pre_l,
+                &it1.post_l_to_lld,
+                &it1.pre_l_to_post_l,
+            )
+        };
+        let (post_to_pre2, leaf2, pre_to_post2) = if right {
+            (
+                &it2.post_r_to_pre_l,
+                &it2.post_r_to_rld,
+                &it2.pre_l_to_post_r,
+            )
+        } else {
+            (
+                &it2.post_l_to_pre_l,
+                &it2.post_l_to_lld,
+                &it2.pre_l_to_post_l,
+            )
+        };
+        let i = pre_to_post1[it1subtree as usize];
+        let j = pre_to_post2[it2subtree as usize];
+        // Offsets so that forestdist indices start at 0.
+        let ioff = leaf1[i as usize] - 1;
+        let joff = leaf2[j as usize] - 1;
+        let rows = (i - ioff) as usize;
+        let cols = (j - joff) as usize;
+        let leaf_i = leaf1[i as usize];
+        let leaf_j = leaf2[j as usize];
+        let stride = self.delta.cols();
+
+        // Column data, indexed by j1 (index 0 unused).
+        let mut cols_buf = Vec::with_capacity(cols + 1);
+        cols_buf.push(Column {
+            node: it2.pre_l_to_node[0],
+            ins: 0.0,
+            delta: 0,
+            leaf: 0,
+            is_tree: false,
+        });
+        for j1 in 1..=cols as i32 {
+            let post = (j1 + joff) as usize;
+            let pre = post_to_pre2[post];
+            let node = it2.pre_l_to_node[pre as usize];
+            cols_buf.push(Column {
+                node,
+                ins: ins_g(node),
+                delta: if trees_swapped {
+                    pre as usize * stride
+                } else {
+                    pre as usize
+                },
+                leaf: (leaf2[post] - 1 - joff) as usize,
+                is_tree: leaf2[post] == leaf_j,
+            });
         }
-        for j1 in 1..=(j - joff) {
-            forestdist[0][j1 as usize] =
-                forestdist[0][(j1 - 1) as usize] + ins_g(it2.post_r_to_node(j1 + joff));
+
+        let delta = self.delta.as_mut_slice();
+        forestdist[0] = 0.0;
+        for i1 in 1..=rows {
+            let node = it1.pre_l_to_node[post_to_pre1[(i1 as i32 + ioff) as usize] as usize];
+            forestdist[i1 * width] = forestdist[(i1 - 1) * width] + del_f(node);
         }
-        for i1 in 1..=(i - ioff) {
-            for j1 in 1..=(j - joff) {
-                self.counter += 1;
-                let (a, b) = (i1 as usize, j1 as usize);
-                let n1 = it1.post_r_to_node(i1 + ioff);
-                let n2 = it2.post_r_to_node(j1 + joff);
+        for j1 in 1..=cols {
+            forestdist[j1] = forestdist[j1 - 1] + cols_buf[j1].ins;
+        }
+        for i1 in 1..=rows {
+            let post1 = (i1 as i32 + ioff) as usize;
+            let f = post_to_pre1[post1];
+            let n1 = it1.pre_l_to_node[f as usize];
+            let del1 = del_f(n1);
+            let row1_is_tree = leaf1[post1] == leaf_i;
+            let leaf_row = (leaf1[post1] - 1 - ioff) as usize * width;
+            let row = i1 * width;
+            let prev = row - width;
+            // Rows before i1 (including the previous row and the rows of
+            // leaf offsets) are read-only while row i1 is written.
+            let (before, rest) = forestdist.split_at_mut(row);
+            let cur = &mut rest[..=cols];
+            let prev_row = &before[prev..=prev + cols];
+            let delta_row = if trees_swapped {
+                f as usize
+            } else {
+                f as usize * stride
+            };
+            let mut left = cur[0];
+            for j1 in 1..=cols {
+                let col = &cols_buf[j1];
                 let u = if trees_swapped {
-                    cm.ren(n2, n1)
+                    cm.ren(col.node, n1)
                 } else {
-                    cm.ren(n1, n2)
+                    cm.ren(n1, col.node)
                 };
-                let da = forestdist[a - 1][b] + del_f(n1);
-                let db = forestdist[a][b - 1] + ins_g(n2);
-                let dc;
-                let f = it1.post_r_to_pre_l[(i1 + ioff) as usize];
-                let g = it2.post_r_to_pre_l[(j1 + joff) as usize];
-                if it1.post_r_to_rld[(i1 + ioff) as usize] == it1.post_r_to_rld[i as usize]
-                    && it2.post_r_to_rld[(j1 + joff) as usize] == it2.post_r_to_rld[j as usize]
-                {
-                    dc = forestdist[a - 1][b - 1] + u;
-                    self.set_delta(f, g, trees_swapped, forestdist[a - 1][b - 1]);
+                let diag = prev_row[j1 - 1];
+                let da = prev_row[j1] + del1;
+                let db = left + col.ins;
+                let di = delta_row + col.delta;
+                let dc = if row1_is_tree && col.is_tree {
+                    // Both subforests are subtrees.
+                    delta[di] = diag;
+                    diag + u
                 } else {
-                    dc = forestdist[(it1.post_r_to_rld[(i1 + ioff) as usize] - 1 - ioff) as usize]
-                        [(it2.post_r_to_rld[(j1 + joff) as usize] - 1 - joff) as usize]
-                        + self.delta_at(f, g, trees_swapped)
-                        + u;
-                }
-                forestdist[a][b] = if da >= db {
+                    before[leaf_row + col.leaf] + delta[di] + u
+                };
+                let v = if da >= db {
                     if db >= dc {
                         dc
                     } else {
@@ -1668,8 +1701,11 @@ impl<'c, C> Work<'c, C> {
                 } else {
                     da
                 };
+                cur[j1] = v;
+                left = v;
             }
         }
+        self.counter += (rows * cols) as u64;
     }
 
     fn update_fn_array(&mut self, ln_for_node: i32, node: i32, current_subtree_pre_l: i32) {

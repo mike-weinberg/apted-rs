@@ -25,7 +25,7 @@ impl CostModel<StringNodeData> for StringUnitCostModel {
         1.0
     }
     fn ren(&self, n1: &Node<StringNodeData>, n2: &Node<StringNodeData>) -> f32 {
-        if n1.node_data().label() == n2.node_data().label() {
+        if n1.node_data().same_label(n2.node_data()) {
             0.0
         } else {
             1.0
@@ -59,7 +59,7 @@ impl CostModel<StringNodeData> for PerEditOperationStringNodeDataCostModel {
         self.ins_cost
     }
     fn ren(&self, n1: &Node<StringNodeData>, n2: &Node<StringNodeData>) -> f32 {
-        if n1.node_data().label() == n2.node_data().label() {
+        if n1.node_data().same_label(n2.node_data()) {
             0.0
         } else {
             self.ren_cost

@@ -55,19 +55,54 @@ impl fmt::Display for Node<StringNodeData> {
 }
 
 /// Node data consisting of a single string label.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Stores a hash of the label so that [`StringNodeData::same_label`] rejects
+/// different labels with one integer comparison. Rename costs compare labels
+/// in the innermost loops of APTED.
+#[derive(Debug, Clone)]
 pub struct StringNodeData {
     label: String,
+    label_hash: u64,
 }
 
 impl StringNodeData {
     pub fn new(label: impl Into<String>) -> Self {
-        Self {
-            label: label.into(),
-        }
+        let label = label.into();
+        let label_hash = fnv1a(label.as_bytes());
+        Self { label, label_hash }
     }
 
     pub fn label(&self) -> &str {
         &self.label
     }
+
+    /// True if both labels are equal.
+    #[inline]
+    pub fn same_label(&self, other: &StringNodeData) -> bool {
+        self.label_hash == other.label_hash && self.label == other.label
+    }
+}
+
+impl PartialEq for StringNodeData {
+    fn eq(&self, other: &Self) -> bool {
+        self.same_label(other)
+    }
+}
+
+impl Eq for StringNodeData {}
+
+impl std::hash::Hash for StringNodeData {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.label.hash(state);
+    }
+}
+
+/// 64-bit FNV-1a hash.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
