@@ -1,0 +1,8 @@
+[package]
+name = "apted"
+version = "0.1.1"
+edition = "2021"
+description = "Rust port of APTED, the tree edit distance algorithm by Pawlik and Augsten"
+license = "MIT"
+
+[dependencies]
