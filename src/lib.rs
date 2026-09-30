@@ -8,6 +8,8 @@
 //! - M. Pawlik and N. Augsten. Tree edit distance: Robust and memory-
 //!   efficient. Information Systems 56. 2016.
 
+#![forbid(unsafe_code)]
+
 pub mod cost_model;
 pub mod distance;
 pub mod error;
@@ -16,6 +18,6 @@ pub mod parser;
 
 pub use cost_model::{CostModel, PerEditOperationStringNodeDataCostModel, StringUnitCostModel};
 pub use distance::{AllPossibleMappingsTED, APTED};
-pub use node::{Node, NodeIndexer, StringNodeData};
 pub use error::{estimated_peak_bytes, TedError};
+pub use node::{Node, NodeIndexer, StringNodeData};
 pub use parser::{BracketStringInputParser, ParseError};

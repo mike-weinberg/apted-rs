@@ -3,8 +3,7 @@
 //! out-of-range panic.
 
 use apted::{
-    BracketStringInputParser, CostModel, Node, StringNodeData, StringUnitCostModel, TedError,
-    APTED,
+    BracketStringInputParser, CostModel, Node, StringNodeData, StringUnitCostModel, TedError, APTED,
 };
 
 fn leaf(l: &str) -> Node<StringNodeData> {
@@ -82,7 +81,11 @@ fn deep_decomposition_is_stack_safe() {
 fn deep_bracket_string_is_stack_safe() {
     let depth = 100_000;
     let s = "{a".repeat(depth) + &"}".repeat(depth);
-    let t = on_small_stack(move || BracketStringInputParser::new().try_from_string(&s).map(|t| t.node_count()));
+    let t = on_small_stack(move || {
+        BracketStringInputParser::new()
+            .try_from_string(&s)
+            .map(|t| t.node_count())
+    });
     assert_eq!(t, Ok(depth));
 }
 
@@ -131,12 +134,18 @@ fn mapping_before_distance_is_an_error() {
     let (t1, t2) = (p.from_string("{a{b}}"), p.from_string("{a}"));
     let (u1, u2) = (p.from_string("{x{y}{z}}"), p.from_string("{x}"));
     let mut apted = APTED::new(StringUnitCostModel);
-    assert_eq!(apted.try_compute_edit_mapping(), Err(TedError::DistanceNotComputed));
+    assert_eq!(
+        apted.try_compute_edit_mapping(),
+        Err(TedError::DistanceNotComputed)
+    );
     apted.compute_edit_distance(&t1, &t2);
     assert!(apted.try_compute_edit_mapping().is_ok());
     // A new pair invalidates the previous distance.
     apted.init(&u1, &u2);
-    assert_eq!(apted.try_compute_edit_mapping(), Err(TedError::DistanceNotComputed));
+    assert_eq!(
+        apted.try_compute_edit_mapping(),
+        Err(TedError::DistanceNotComputed)
+    );
 }
 
 #[test]

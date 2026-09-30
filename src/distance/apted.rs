@@ -153,7 +153,8 @@ impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
         t2: &'a Node<D>,
     ) -> Result<f32, TedError> {
         let (size1, size2) = (t1.node_count(), t2.node_count());
-        let bytes = estimated_peak_bytes(size1, size2).ok_or(TedError::TooLarge { size1, size2 })?;
+        let bytes =
+            estimated_peak_bytes(size1, size2).ok_or(TedError::TooLarge { size1, size2 })?;
         check_memory(bytes, self.memory_limit)?;
         self.init(t1, t2);
         self.checked_bytes = bytes;
@@ -534,8 +535,7 @@ pub(crate) fn compute_opt_strategy_post_l<D>(
                 // Use new single-path functions for small subtrees.
                 min_cost = size_v.max(size_w) as f32;
             } else {
-                let mut tmp_cost =
-                    size_v as f32 * it2.pre_l_to_kr_sum[wp] + pool.l[row_v][w];
+                let mut tmp_cost = size_v as f32 * it2.pre_l_to_kr_sum[wp] + pool.l[row_v][w];
                 if tmp_cost < min_cost {
                     min_cost = tmp_cost;
                     strategy_path = left_path_v;
@@ -1051,7 +1051,6 @@ impl<'c, C> Work<'c, C> {
 
         // Forest sizes and costs, summed up incrementally.
         let mut current_forest_size1: i32 = 0;
-        let mut current_forest_size2: i32;
         let mut tmp_forest_size1: i32;
         let mut current_forest_cost1: f32 = 0.0;
         let mut current_forest_cost2: f32;
@@ -1060,8 +1059,8 @@ impl<'c, C> Work<'c, C> {
         let subtree_size2 = it2.sizes[current_subtree_pre_l2 as usize];
         let subtree_size1 = it1.sizes[current_subtree_pre_l1 as usize];
         let w = (subtree_size2 + 1) as usize; // Row width of both s and t.
-        // t is (max(n, m) + 1)² in the worst case, beyond the estimate
-        // checked up front, so check it (with s) before allocating.
+                                              // t is (max(n, m) + 1)² in the worst case, beyond the estimate
+                                              // checked up front, so check it (with s) before allocating.
         let tables = w
             .checked_mul(w)
             .and_then(|t| t.checked_add((subtree_size1 + 1) as usize * w))
@@ -1119,15 +1118,11 @@ impl<'c, C> Work<'c, C> {
 
             // Deal with nodes to the left of the path.
             if path_type == RIGHT || path_type == INNER && left_part {
-                let r_f_first;
-                let l_f_first;
-                if start_path_node == -1 {
-                    r_f_first = end_path_node_in_pre_r;
-                    l_f_first = end_path_node;
+                let (r_f_first, l_f_first) = if start_path_node == -1 {
+                    (end_path_node_in_pre_r, end_path_node)
                 } else {
-                    r_f_first = start_path_node_in_pre_r;
-                    l_f_first = start_path_node - 1;
-                }
+                    (start_path_node_in_pre_r, start_path_node - 1)
+                };
                 if !right_part {
                     r_f_last = end_path_node_in_pre_r;
                 }
@@ -1195,8 +1190,10 @@ impl<'c, C> Work<'c, C> {
                         current_forest_size1 += 1;
                         current_forest_cost1 += del_f(l_f_node);
                         // Reset size and cost of forest in G to subtree
-                        // G_lGfirst.
-                        current_forest_size2 = it2sizes[l_g_first as usize];
+                        // G_lGfirst. The Java original also increments the G
+                        // forest size in loop D, but it only ever reads the
+                        // size right here, so only `size == 1` is kept.
+                        let g_forest_is_single_node = it2sizes[l_g_first as usize] == 1;
                         current_forest_cost2 = sum_ins_g(l_g_first);
                         let l_f_in_pre_r = it1pre_l_to_pre_r[l_f as usize];
                         let f_forest_is_tree = l_f_in_pre_r == r_f;
@@ -1244,7 +1241,7 @@ impl<'c, C> Work<'c, C> {
                         }
                         sp1 += del_f(l_f_node);
                         min_cost = sp1;
-                        if current_forest_size2 == 1 {
+                        if g_forest_is_single_node {
                             sp2 = current_forest_cost1;
                         } else {
                             sp2 = self.q[l_f as usize];
@@ -1270,8 +1267,7 @@ impl<'c, C> Work<'c, C> {
                         // of rG.
                         while l_g >= l_g_last {
                             let lgu = l_g as usize;
-                            // Increment size and cost of G forest by node lG.
-                            current_forest_size2 += 1;
+                            // Increment cost of G forest by node lG.
                             current_forest_cost2 += ins_g(it2nodes[lgu]);
                             match sp1source {
                                 1 => sp1 = s[si(sp1s_row, l_g - it2_pre_l_off)] + del_f(l_f_node),
@@ -1446,8 +1442,9 @@ impl<'c, C> Work<'c, C> {
                         // Increment size and cost of F forest by node rF.
                         current_forest_size1 += 1;
                         current_forest_cost1 += del_f(r_f_node);
-                        // Reset size and cost of G forest to G_lG.
-                        current_forest_size2 = it2sizes[lgu];
+                        // Reset size and cost of G forest to G_lG (only
+                        // `size == 1` is read; see loop C).
+                        let g_forest_is_single_node = it2sizes[lgu] == 1;
                         current_forest_cost2 = sum_ins_g(l_g);
                         let r_f_subtree_size = it1sizes[r_f_in_pre_l as usize];
                         let (
@@ -1490,14 +1487,13 @@ impl<'c, C> Work<'c, C> {
                         if sp3source == 1 {
                             sp3s_row = (r_f + r_f_subtree_size) - it1_pre_r_off;
                         }
-                        if current_forest_size2 == 1 {
+                        if g_forest_is_single_node {
                             sp2 = current_forest_cost1;
                         } else {
                             sp2 = self.q[r_f as usize];
                         }
                         let mut r_g = r_g_first;
                         let r_g_first_in_pre_l = it2pre_r_to_pre_l[r_g_first as usize];
-                        current_forest_size2 += 1;
                         match sp1source {
                             1 => sp1 = s[si(sp1s_row, r_g - it2_pre_r_off)],
                             2 => sp1 = t[si(sp1t_row, r_g - it2_pre_r_off)],
@@ -1527,8 +1523,7 @@ impl<'c, C> Work<'c, C> {
                         while r_g >= r_g_last {
                             let r_g_in_pre_l = it2pre_r_to_pre_l[r_g as usize];
                             let rgp = r_g_in_pre_l as usize;
-                            // Increment size and cost of G forest by node rG.
-                            current_forest_size2 += 1;
+                            // Increment cost of G forest by node rG.
                             current_forest_cost2 += ins_g(it2nodes[rgp]);
                             match sp1source {
                                 1 => sp1 = s[si(sp1s_row, r_g - it2_pre_r_off)] + del_f(r_f_node),

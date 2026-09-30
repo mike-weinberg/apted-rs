@@ -149,7 +149,16 @@ mod tests {
     #[test]
     fn rejects_malformed_input() {
         for bad in [
-            "", "   ", "}", "{", "a{b}", "{a}{b}", "{a}x", "{a{b}x{c}}", "{a{b}", "{a{b} {c}}",
+            "",
+            "   ",
+            "}",
+            "{",
+            "a{b}",
+            "{a}{b}",
+            "{a}x",
+            "{a{b}x{c}}",
+            "{a{b}",
+            "{a{b} {c}}",
             "{a<{b}>}",
         ] {
             assert!(p(bad).is_err(), "accepted {bad:?}");

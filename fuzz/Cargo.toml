@@ -1,0 +1,37 @@
+[package]
+name = "apted-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# The crate under test stays dependency-free; only this fuzz crate depends on
+# libfuzzer-sys. The empty table keeps it out of the parent's workspace.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+apted = { path = ".." }
+
+[[bin]]
+name = "parser"
+path = "fuzz_targets/parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "distance"
+path = "fuzz_targets/distance.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "differential"
+path = "fuzz_targets/differential.rs"
+test = false
+doc = false
+bench = false

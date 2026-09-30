@@ -104,7 +104,10 @@ impl<'a, C: CostModel<D>, D> AllPossibleMappingsTED<'a, C, D> {
         let it1 = self.it1.as_ref().unwrap();
         let it2 = self.it2.as_ref().unwrap();
         let cm = &self.cost_model;
-        let mut min_cost = (self.size1 + self.size2) as f32;
+        // Upstream starts at size1 + size2, which is only an upper bound
+        // when every deletion and insertion costs at most 1
+        // (tests/regressions.rs).
+        let mut min_cost = f32::INFINITY;
         for m in ted_mappings {
             let mut m_cost = 0.0f32;
             for e in m {
