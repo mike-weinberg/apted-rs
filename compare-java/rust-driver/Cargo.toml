@@ -1,0 +1,12 @@
+# Prints, for each case on stdin, the lines GoldenDump.java prints, computed
+# by the crate one directory up (or by any other checkout: edit the path).
+[package]
+name = "apted-compare-driver"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+apted = { path = "../.." }
+
+[workspace]
