@@ -1,0 +1,13 @@
+pair (ms)                java literal-port      +spf_lr      +matrix   +labelhash   +splitrows
+random-random          241.56       225.30       185.17       183.00       157.58       145.03
+left-left               56.04        39.22        30.88        31.00        27.53        26.13
+right-right             34.34        39.59        32.38        31.80        29.54        26.35
+binary-binary          241.23       349.57       266.21       249.33       206.23       194.94
+zigzag-zigzag         1946.51      2210.35      2136.20      2074.23      1937.74      1959.53
+flat-flat               40.20        45.77        37.53        41.37        35.35        36.29
+left-right            1606.97      1869.60      1756.40      1691.03      1585.07      1653.83
+zigzag-binary         2639.99      3635.70      2889.68      2677.61      2265.15      2037.49
+random-zigzag         1592.90      2192.67      1771.81      1675.09      1395.20      1325.00
+TOTAL                 8399.74     10607.77      9106.26      8654.46      7639.39      7404.59
+speedup vs java         1.00x        0.79x        0.92x        0.97x        1.10x        1.13x
+distances: all implementations agree on every pair

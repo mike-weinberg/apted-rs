@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned, so a new stable clippy lint cannot turn unrelated PRs red.
+  TOOLCHAIN: 1.98.1
+  # Keep equal to `rust-version` in Cargo.toml.
+  MSRV: "1.70"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install "$TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+      - run: rustup default "$TOOLCHAIN"
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      # Both configurations: debug keeps overflow checks on, release is what
+      # users run and wraps silently.
+      - run: cargo test --release
+      - run: cargo test
+      - run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install "$MSRV" --profile minimal
+      - run: cargo +"$MSRV" check --lib
+
+  tools:
+    # The fuzz crate and the Java comparison driver are separate crates. This
+    # only checks that they compile; nothing is fuzzed in CI. cargo-fuzz needs
+    # nightly to run, but `cargo check` of the fuzz crate works on stable.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install "$TOOLCHAIN" --profile minimal
+      - run: rustup default "$TOOLCHAIN"
+      - run: cargo check --locked --manifest-path fuzz/Cargo.toml --bins
+      - run: cargo check --locked --manifest-path compare-java/rust-driver/Cargo.toml
