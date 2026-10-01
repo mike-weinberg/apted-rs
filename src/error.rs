@@ -3,18 +3,34 @@
 use std::fmt;
 
 /// Why a distance or mapping could not be computed.
+///
+/// New variants may be added in minor releases.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TedError {
     /// The trees exceed the algorithm's representable size: node ids are
     /// stored in `f32` (as in the Java implementation), so the combined
     /// node count must stay below 2^24, and the memory estimate must fit in
     /// `usize`.
-    TooLarge { size1: usize, size2: usize },
+    TooLarge {
+        /// Node count of the first tree.
+        size1: usize,
+        /// Node count of the second tree.
+        size2: usize,
+    },
     /// The estimated peak memory is above the limit set with
     /// [`crate::APTED::with_memory_limit`].
-    MemoryLimitExceeded { estimated: usize, limit: usize },
+    MemoryLimitExceeded {
+        /// Estimated peak memory in bytes.
+        estimated: usize,
+        /// The configured limit in bytes.
+        limit: usize,
+    },
     /// The allocator refused the estimated peak memory.
-    AllocationFailed { bytes: usize },
+    AllocationFailed {
+        /// Size of the refused request in bytes.
+        bytes: usize,
+    },
     /// The mapping was requested before a distance was computed for the
     /// current pair of trees.
     DistanceNotComputed,

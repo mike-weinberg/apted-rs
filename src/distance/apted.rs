@@ -36,6 +36,21 @@ const INNER: u8 = 2;
 const INF: f32 = i64::MAX as f32;
 
 /// The APTED algorithm with cost model `C` for node data `D`.
+///
+/// An `APTED` value borrows both trees from the call to
+/// [`compute_edit_distance`](Self::compute_edit_distance) until it is
+/// dropped, and keeps the intermediate results that
+/// [`compute_edit_mapping`](Self::compute_edit_mapping) needs. Create one per
+/// pair of trees, or reuse it sequentially.
+///
+/// ```
+/// use apted::{BracketStringInputParser, StringUnitCostModel, APTED};
+///
+/// let p = BracketStringInputParser::new();
+/// let (t1, t2) = (p.from_string("{a{b}{c}}"), p.from_string("{a{b{d}}}"));
+/// let mut apted = APTED::new(StringUnitCostModel);
+/// assert_eq!(apted.compute_edit_distance(&t1, &t2), 2.0);
+/// ```
 pub struct APTED<'a, C, D> {
     cost_model: C,
     it1: Option<NodeIndexer<'a, D>>,
@@ -107,6 +122,7 @@ struct GtedFrame {
 }
 
 impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
+    /// Creates the algorithm with `cost_model`, with no memory limit.
     pub fn new(cost_model: C) -> Self {
         Self {
             cost_model,
@@ -132,7 +148,8 @@ impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
     }
 
     /// Computes the tree edit distance between the source and destination
-    /// trees using APTED [1,2].
+    /// trees using APTED (Pawlik and Augsten; see the references in the crate
+    /// documentation).
     ///
     /// Panics if the trees are too large or the memory is not available;
     /// see [`Self::try_compute_edit_distance`] for the checks.
@@ -172,9 +189,10 @@ impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
         Ok(d)
     }
 
-    /// Testing-only entry point: computes TED with a fixed path type in the
+    /// Testing-only entry point, not part of the supported API: computes TED with a fixed path type in the
     /// strategy to trigger a specific single-path function. `spf_type` is
     /// 0 for left paths (spfL) and 1 for right paths (spfR).
+    #[doc(hidden)]
     pub fn compute_edit_distance_spf_test(
         &mut self,
         t1: &'a Node<D>,
@@ -198,7 +216,9 @@ impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
         d
     }
 
-    /// Indexes both input trees and stores their sizes.
+    /// Indexes both input trees and stores their sizes. Testing-only, not
+    /// part of the supported API.
+    #[doc(hidden)]
     pub fn init(&mut self, t1: &'a Node<D>, t2: &'a Node<D>) {
         let it1 = NodeIndexer::new(t1, &self.cost_model);
         let it2 = NodeIndexer::new(t2, &self.cost_model);
@@ -241,6 +261,8 @@ impl<'a, C: CostModel<D>, D> APTED<'a, C, D> {
     }
 
     /// Number of subproblems encountered in the last distance computation.
+    /// Used by the benchmark; not part of the supported API.
+    #[doc(hidden)]
     pub fn counter(&self) -> u64 {
         self.counter
     }

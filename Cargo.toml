@@ -2,8 +2,27 @@
 name = "apted"
 version = "0.1.1"
 edition = "2021"
+rust-version = "1.70"
 description = "Rust port of APTED, the tree edit distance algorithm by Pawlik and Augsten"
 license = "MIT"
+repository = "https://github.com/mike-weinberg/apted-rs"
+homepage = "https://github.com/mike-weinberg/apted-rs"
+documentation = "https://docs.rs/apted"
+readme = "README.md"
+keywords = ["tree-edit-distance", "apted", "tree", "edit-distance"]
+categories = ["algorithms"]
+# The port is MIT (LICENSE); the ported algorithm and its test fixtures are
+# MIT from the upstream Java project (LICENSE-APTED-JAVA). Ship both.
+include = [
+    "/src",
+    "/tests",
+    "/examples",
+    "/Cargo.toml",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/LICENSE-APTED-JAVA",
+]
 
 [dependencies]
 

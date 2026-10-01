@@ -8,6 +8,9 @@ use crate::node::{Node, NodeIndexer};
 /// A mapping element: a pair of preorder ids, `-1` for deletion/insertion.
 type Mapping = Vec<[i32; 2]>;
 
+/// Brute-force reference implementation, a test oracle for trees of a
+/// handful of nodes. Exponential, and not part of the supported API.
+#[doc(hidden)]
 pub struct AllPossibleMappingsTED<'a, C, D> {
     cost_model: C,
     it1: Option<NodeIndexer<'a, D>>,
@@ -17,6 +20,7 @@ pub struct AllPossibleMappingsTED<'a, C, D> {
 }
 
 impl<'a, C: CostModel<D>, D> AllPossibleMappingsTED<'a, C, D> {
+    /// Creates the oracle with `cost_model`.
     pub fn new(cost_model: C) -> Self {
         Self {
             cost_model,
@@ -27,6 +31,7 @@ impl<'a, C: CostModel<D>, D> AllPossibleMappingsTED<'a, C, D> {
         }
     }
 
+    /// Computes the tree edit distance by enumerating every mapping.
     pub fn compute_edit_distance(&mut self, t1: &'a Node<D>, t2: &'a Node<D>) -> f32 {
         self.init(t1, t2);
         let mut mappings = self.generate_all_one_to_one_mappings();
@@ -34,6 +39,7 @@ impl<'a, C: CostModel<D>, D> AllPossibleMappingsTED<'a, C, D> {
         self.get_min_cost(&mappings)
     }
 
+    /// Indexes both input trees.
     pub fn init(&mut self, t1: &'a Node<D>, t2: &'a Node<D>) {
         let it1 = NodeIndexer::new(t1, &self.cost_model);
         let it2 = NodeIndexer::new(t2, &self.cost_model);

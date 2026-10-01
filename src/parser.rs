@@ -2,9 +2,9 @@
 //!
 //! Ports `parser.BracketStringInputParser`, with two deliberate differences:
 //! the parser is a single iterative pass (linear time, no recursion, so any
-//! nesting depth is safe), and it is strict. The Java implementation (and
-//! the first version of this port) silently dropped or merged nodes on
-//! malformed input such as `{a{b}x{c}}` or `{a}{b}`; here that is an error.
+//! nesting depth is safe), and it is strict. The Java implementation
+//! silently drops or merges nodes on malformed input such as `{a{b}x{c}}` or
+//! `{a}{b}`; here that is an error.
 //!
 //! Grammar: `tree := '{' label tree* '}'`, optionally surrounded by
 //! whitespace. A label is any text up to the next unescaped brace; `\{`,
@@ -17,6 +17,7 @@ use crate::node::{Node, StringNodeData};
 
 /// Why a bracket-notation string could not be parsed.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ParseError {
     /// Byte offset in the input where the problem was detected.
     pub position: usize,
@@ -36,10 +37,13 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// Parser for trees in bracket notation; see the [module](self) for the
+/// grammar.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BracketStringInputParser;
 
 impl BracketStringInputParser {
+    /// Creates a parser.
     pub fn new() -> Self {
         Self
     }

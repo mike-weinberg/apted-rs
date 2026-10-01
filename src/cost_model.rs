@@ -3,6 +3,12 @@
 use crate::node::{Node, StringNodeData};
 
 /// Costs of the three edit operations. Mirrors `costmodel.CostModel`.
+///
+/// `del` and `ins` run once per node while the trees are indexed; `ren` runs
+/// in the innermost loops, so keep it cheap. For a metric distance keep costs
+/// non-negative and finite, `ren(a, a)` zero, and `ren` symmetric. NaN costs
+/// are rejected with [`TedError::NotANumber`](crate::TedError::NotANumber)
+/// when a mapping is requested.
 pub trait CostModel<D> {
     /// Cost of deleting node `n`.
     fn del(&self, n: &Node<D>) -> f32;
@@ -42,6 +48,8 @@ pub struct PerEditOperationStringNodeDataCostModel {
 }
 
 impl PerEditOperationStringNodeDataCostModel {
+    /// Creates a model that charges `del_cost` per deletion, `ins_cost` per
+    /// insertion and `ren_cost` per rename of a node whose label changes.
     pub fn new(del_cost: f32, ins_cost: f32, ren_cost: f32) -> Self {
         Self {
             del_cost,

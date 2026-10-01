@@ -13,45 +13,45 @@ use crate::cost_model::CostModel;
 /// preorder, `pre_r` right-to-left preorder, `post_l` left-to-right
 /// postorder, `post_r` right-to-left postorder, `lld` leftmost leaf
 /// descendant, `rld` rightmost leaf descendant, `ln` previous leaf node.
-pub struct NodeIndexer<'a, D> {
+pub(crate) struct NodeIndexer<'a, D> {
     /// Nodes by left-to-right preorder id.
-    pub pre_l_to_node: Vec<&'a Node<D>>,
+    pub(crate) pre_l_to_node: Vec<&'a Node<D>>,
     /// Subtree sizes by left-to-right preorder id.
-    pub sizes: Vec<i32>,
+    pub(crate) sizes: Vec<i32>,
     /// Parent preorder ids (`-1` for the root).
-    pub parents: Vec<i32>,
+    pub(crate) parents: Vec<i32>,
     /// Children preorder ids, in left-to-right order.
-    pub children: Vec<Vec<i32>>,
-    pub post_l_to_lld: Vec<i32>,
-    pub post_r_to_rld: Vec<i32>,
-    pub pre_l_to_ln: Vec<i32>,
-    pub pre_r_to_ln: Vec<i32>,
+    pub(crate) children: Vec<Vec<i32>>,
+    pub(crate) post_l_to_lld: Vec<i32>,
+    pub(crate) post_r_to_rld: Vec<i32>,
+    pub(crate) pre_l_to_ln: Vec<i32>,
+    pub(crate) pre_r_to_ln: Vec<i32>,
     /// True for nodes that are the leftmost child of their parent.
-    pub node_type_l: Vec<bool>,
+    pub(crate) node_type_l: Vec<bool>,
     /// True for nodes that are the rightmost child of their parent.
-    pub node_type_r: Vec<bool>,
-    pub pre_l_to_pre_r: Vec<i32>,
-    pub pre_r_to_pre_l: Vec<i32>,
-    pub pre_l_to_post_l: Vec<i32>,
-    pub post_l_to_pre_l: Vec<i32>,
-    pub pre_l_to_post_r: Vec<i32>,
-    pub post_r_to_pre_l: Vec<i32>,
+    pub(crate) node_type_r: Vec<bool>,
+    pub(crate) pre_l_to_pre_r: Vec<i32>,
+    pub(crate) pre_r_to_pre_l: Vec<i32>,
+    pub(crate) pre_l_to_post_l: Vec<i32>,
+    pub(crate) post_l_to_pre_l: Vec<i32>,
+    pub(crate) pre_l_to_post_r: Vec<i32>,
+    pub(crate) post_r_to_pre_l: Vec<i32>,
     /// Cost of the spf_L single-path function per subtree. The three cost
     /// arrays are summed in `i64` and stored as `f32`, the type the strategy
     /// computation uses; `i32` sums (as in Java) overflow above ~46k nodes.
-    pub pre_l_to_kr_sum: Vec<f32>,
+    pub(crate) pre_l_to_kr_sum: Vec<f32>,
     /// Cost of the spf_R single-path function per subtree.
-    pub pre_l_to_rev_kr_sum: Vec<f32>,
+    pub(crate) pre_l_to_rev_kr_sum: Vec<f32>,
     /// Cost of the spf_A single-path function per subtree.
-    pub pre_l_to_desc_sum: Vec<f32>,
+    pub(crate) pre_l_to_desc_sum: Vec<f32>,
     /// Cost of deleting every node of the subtree.
-    pub pre_l_to_sum_del_cost: Vec<f32>,
+    pub(crate) pre_l_to_sum_del_cost: Vec<f32>,
     /// Cost of inserting every node of the subtree.
-    pub pre_l_to_sum_ins_cost: Vec<f32>,
+    pub(crate) pre_l_to_sum_ins_cost: Vec<f32>,
     /// Number of leftmost-child leaves.
-    pub lchl: i32,
+    pub(crate) lchl: i32,
     /// Number of rightmost-child leaves.
-    pub rchl: i32,
+    pub(crate) rchl: i32,
     current_node: Cell<i32>,
     tree_size: i32,
 }
@@ -85,7 +85,7 @@ impl<'a, D> Frame<'a, D> {
 }
 
 impl<'a, D> NodeIndexer<'a, D> {
-    pub fn new<C: CostModel<D> + ?Sized>(input_tree: &'a Node<D>, cost_model: &C) -> Self {
+    pub(crate) fn new<C: CostModel<D> + ?Sized>(input_tree: &'a Node<D>, cost_model: &C) -> Self {
         let n = input_tree.node_count();
         let mut ni = NodeIndexer {
             pre_l_to_node: Vec::with_capacity(n),
@@ -255,39 +255,35 @@ impl<'a, D> NodeIndexer<'a, D> {
     }
 
     /// Leftmost leaf descendant of a node, both in left-to-right preorder.
-    pub fn pre_l_to_lld(&self, pre_l: i32) -> i32 {
+    pub(crate) fn pre_l_to_lld(&self, pre_l: i32) -> i32 {
         self.post_l_to_pre_l
             [self.post_l_to_lld[self.pre_l_to_post_l[pre_l as usize] as usize] as usize]
     }
 
     /// Rightmost leaf descendant of a node, both in left-to-right preorder.
-    pub fn pre_l_to_rld(&self, pre_l: i32) -> i32 {
+    pub(crate) fn pre_l_to_rld(&self, pre_l: i32) -> i32 {
         self.post_r_to_pre_l
             [self.post_r_to_rld[self.pre_l_to_post_r[pre_l as usize] as usize] as usize]
     }
 
-    pub fn post_l_to_node(&self, post_l: i32) -> &'a Node<D> {
+    pub(crate) fn post_l_to_node(&self, post_l: i32) -> &'a Node<D> {
         self.pre_l_to_node[self.post_l_to_pre_l[post_l as usize] as usize]
     }
 
-    pub fn post_r_to_node(&self, post_r: i32) -> &'a Node<D> {
-        self.pre_l_to_node[self.post_r_to_pre_l[post_r as usize] as usize]
-    }
-
-    pub fn size(&self) -> i32 {
+    pub(crate) fn size(&self) -> i32 {
         self.tree_size
     }
 
-    pub fn is_leaf(&self, node: i32) -> bool {
+    pub(crate) fn is_leaf(&self, node: i32) -> bool {
         self.sizes[node as usize] == 1
     }
 
     /// Root of the subtree currently processed in the tree decomposition.
-    pub fn current_node(&self) -> i32 {
+    pub(crate) fn current_node(&self) -> i32 {
         self.current_node.get()
     }
 
-    pub fn set_current_node(&self, preorder: i32) {
+    pub(crate) fn set_current_node(&self, preorder: i32) {
         self.current_node.set(preorder);
     }
 }

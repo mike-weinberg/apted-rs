@@ -1,10 +1,10 @@
-//! Tree nodes and node indexing.
+//! Tree nodes and their data.
 
 mod node_indexer;
 
 use std::fmt;
 
-pub use node_indexer::NodeIndexer;
+pub(crate) use node_indexer::NodeIndexer;
 
 /// A tree node holding data of type `D` and an ordered list of children.
 ///
@@ -17,6 +17,7 @@ pub struct Node<D> {
 }
 
 impl<D> Node<D> {
+    /// Creates a node holding `node_data` and no children.
     pub fn new(node_data: D) -> Self {
         Self {
             node_data,
@@ -35,18 +36,22 @@ impl<D> Node<D> {
         count
     }
 
+    /// Appends `c` as the last child. Child order matters: trees are ordered.
     pub fn add_child(&mut self, c: Node<D>) {
         self.children.push(c);
     }
 
+    /// The data stored in this node.
     pub fn node_data(&self) -> &D {
         &self.node_data
     }
 
+    /// Replaces the data stored in this node.
     pub fn set_node_data(&mut self, node_data: D) {
         self.node_data = node_data;
     }
 
+    /// The children in left-to-right order.
     pub fn children(&self) -> &[Node<D>] {
         &self.children
     }
@@ -178,12 +183,14 @@ pub struct StringNodeData {
 }
 
 impl StringNodeData {
+    /// Creates node data for `label`, hashing it once.
     pub fn new(label: impl Into<String>) -> Self {
         let label = label.into();
         let label_hash = fnv1a(label.as_bytes());
         Self { label, label_hash }
     }
 
+    /// The label text.
     pub fn label(&self) -> &str {
         &self.label
     }
